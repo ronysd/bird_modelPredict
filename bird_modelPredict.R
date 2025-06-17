@@ -123,17 +123,17 @@ doEvent.bird_modelPredict = function(sim, eventTime, eventType) {
 ### template initialization
 Init <- function(sim) {
   # # ! ----- EDIT BELOW ----- ! #
-  ## ---- Predict species models ---- ##
+   # Predict species models  
   PredictAllSpecies_blist <- function(sim, year, nBoot = NULL, modelFolder, outFolder ) {
     bcr_code <- unique(sim$studyArea$subUnit)
     if (length(bcr_code) != 1) stop("studyArea must have a single BCR subUnit.")
     
-    modelFiles <- list.files(modelFolder, pattern = "\\.Rdata$", full.names = TRUE)
+    modelFiles <- list.files(modelFolder, pattern = "\\.Rdata$", full.names = TRUE) ## also need to add BCR_code, incase more than one BCR are stored in the folder 
     dir.create(outFolder, recursive = TRUE, showWarnings = FALSE)
     
     for (modelPath in modelFiles) {
       message("Processing model file: ", modelPath)
-      load(modelPath)  # loads b.list
+      load(modelPath)  # loads b.list, this needs to be aligned with the model objects, when single model object contains all bootstrap, they are contained under b.list. 
       
       speciesName <- sub("_can.*$", "", basename(modelPath))
       
@@ -178,7 +178,7 @@ Init <- function(sim) {
   }
   
   
-  ## ---- Summarize Bootstrap ---- ##
+  # Summarize Bootstrap 
   SummarizeAndSaveBootstrapStack <- function(sim, speciesName, bcr_code, outFolder = "predictions") {
     boot_stack <- sim$predictedList[[speciesName]]
     mean_r <- terra::app(boot_stack, mean, na.rm = TRUE)
