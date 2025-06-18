@@ -232,13 +232,22 @@ plotFun <- function(sim) {
   for (speciesName in names(sim$summaries)) {
     summary <- sim$summaries[[speciesName]]
     
-    mean_r <- raster::raster(summary$mean)
-    sd_r   <- raster::raster(summary$sd)
+    Plots(summary$mean,
+          fn = gg_predMap,
+          types = P(sim)$.plots,
+          filename = paste0(speciesName, "_mean_yr_", time(sim)),
+          title = paste(speciesName, "Mean", time(sim)),
+          path = file.path(figurePath(sim)))
     
-    Plots(mean_r, filename = paste(speciesName, "- Mean"),path = file.path(figurePath(sim)))
-    Plots(sd_r, filename = paste(speciesName, "- SD"),path = file.path(figurePath(sim)))
+    Plots(summary$sd,
+          fn = gg_predMap,
+          types = P(sim)$.plots,
+          filename = paste0(speciesName, "_sd_yr_", time(sim)),
+          title = paste(speciesName, "SD", time(sim)),
+          path = file.path(figurePath(sim)))
   }
-  return(invisible(sim)) 
+  
+  return(invisible(sim))
 }
 ### template for your event1
 Event1 <- function(sim) {
