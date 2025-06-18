@@ -15,10 +15,10 @@ defineModule(sim, list(
   timeunit = "year",
   citation = list("citation.bib"),
   documentation = list("NEWS.md", "README.md", "bird_modelPredict.Rmd"),
-  reqdPkgs = list("SpaDES.core (>= 2.1.5.9003)", "ggplot2"),
+  reqdPkgs = list("SpaDES.core (>= 2.1.5.9003)", "ggplot2","SpaDES.core", "tidyterra", "viridis"),
   parameters = bindrows(
     #defineParameter("paramName", "paramClass", value, min, max, "parameter description"),
-    defineParameter(".plots", "character", "screen", NA, NA,
+    defineParameter(".plots", "character", "png", NA, NA,
                     "Used by Plots function, which can be optionally used here"),
     defineParameter(".plotInitialTime", "numeric", start(sim), NA, NA,
                     "Describes the simulation time at which the first plot event should occur."),
@@ -124,73 +124,9 @@ doEvent.bird_modelPredict = function(sim, eventTime, eventType) {
 Init <- function(sim) {
   # # ! ----- EDIT BELOW ----- ! #
    # Predict species models  
-  PredictAllSpecies_blist <- function(sim, year, nBoot = NULL, modelFolder, outFolder ) {
-    bcr_code <- unique(sim$studyArea$subUnit)
-    if (length(bcr_code) != 1) stop("studyArea must have a single BCR subUnit.")
-    
-    modelFiles <- list.files(modelFolder, pattern = "\\.Rdata$", full.names = TRUE) ## also need to add BCR_code, incase more than one BCR are stored in the folder 
-    dir.create(outFolder, recursive = TRUE, showWarnings = FALSE)
-    
-    for (modelPath in modelFiles) {
-      message("Processing model file: ", modelPath)
-      load(modelPath)  # loads b.list, this needs to be aligned with the model objects, when single model object contains all bootstrap, they are contained under b.list. 
-      
-      speciesName <- sub("_can.*$", "", basename(modelPath))
-      
-      boot_indices <- seq_along(b.list)
-      if (!is.null(nBoot)) {
-        boot_indices <- boot_indices[1:min(nBoot, length(boot_indices))]
-      }
-      
-      boot_rasters <- list()
-      for (bootNum in boot_indices) {
-        message(" - Bootstrap: ", bootNum)
-        
-        ras_stack <- sim$stack_list[[year]]
-        
-        model_vars <- b.list[[bootNum]][["var.names"]]
-        ras_vars <- names(ras_stack)
-        missing_vars <- setdiff(model_vars, ras_vars)
-        
-        if (length(missing_vars) > 0) {
-          warning("Missing vars for ", speciesName, " bootstrap ", bootNum, ": ", paste(missing_vars, collapse=", "))
-          next
-        }
-        
-        ras_subset <- terra::subset(ras_stack, model_vars)
-        
-        pred_raster <- terra::predict(ras_subset, b.list[[bootNum]], type = "response")
-        
-        boot_rasters[[bootNum]] <- pred_raster
-      }
-      
-      boot_stack <- rast(boot_rasters)
-      names(boot_stack) <- paste0("b", seq_len(nlyr(boot_stack)), "_",year)
-      sim$predictedList[[speciesName]] <- boot_stack
-      outPath <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_prediction.tif"))
-      terra::writeRaster(boot_stack, outPath, overwrite = TRUE)
-      
-      message("Prediction stack saved for ", speciesName)
-    }
-    
-    message("all predictions complete!")
-    return(sim)
-  }
+
   
-  
-  # Summarize Bootstrap 
-  SummarizeAndSaveBootstrapStack <- function(sim, speciesName, bcr_code, outFolder = "predictions") {
-    boot_stack <- sim$predictedList[[speciesName]]
-    mean_r <- terra::app(boot_stack, mean, na.rm = TRUE)
-    sd_r <- terra::app(boot_stack, sd, na.rm = TRUE)
-    mean_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_mean.tif"))
-    sd_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_sd.tif"))
-    terra::writeRaster(mean_r, mean_path, overwrite = TRUE)
-    terra::writeRaster(sd_r, sd_path, overwrite = TRUE)
-    return(list(mean = mean_r, sd = sd_r))
-  }
-  
-  ## Call prediction & summaries inside Init() ##
+  ## Call prediction & summaries
   sim <- PredictAllSpecies_blist(sim, year = "2010", nBoot = 2, modelFolder = file.path(inputPath(sim)), outFolder= "predictions") #modelFolder = sim$modelFolder, year = P(sim)$predictionYear,nBoot = P(sim)$nBoot
   ## currently, the model is predicted for a single year and XX boot. we need to connect this with the year from setupPorject call
   bcr_code <- unique(sim$studyArea$subUnit)
@@ -201,6 +137,71 @@ Init <- function(sim) {
   # ! ----- STOP EDITING ----- ! #
 
   return(invisible(sim))
+}
+PredictAllSpecies_blist <- function(sim, year, nBoot = NULL, modelFolder, outFolder ) {
+  bcr_code <- unique(sim$studyArea$subUnit)
+  if (length(bcr_code) != 1) stop("studyArea must have a single BCR subUnit.")
+  
+  modelFiles <- list.files(modelFolder, pattern = "\\.Rdata$", full.names = TRUE) ## also need to add BCR_code, incase more than one BCR are stored in the folder 
+  dir.create(outFolder, recursive = TRUE, showWarnings = FALSE)
+  
+  for (modelPath in modelFiles) {
+    message("Processing model file: ", modelPath)
+    load(modelPath)  # loads b.list, this needs to be aligned with the model objects, when single model object contains all bootstrap, they are contained under b.list. 
+    
+    speciesName <- sub("_can.*$", "", basename(modelPath))
+    
+    boot_indices <- seq_along(b.list)
+    if (!is.null(nBoot)) {
+      boot_indices <- boot_indices[1:min(nBoot, length(boot_indices))]
+    }
+    
+    boot_rasters <- list()
+    for (bootNum in boot_indices) {
+      message(" - Bootstrap: ", bootNum)
+      
+      ras_stack <- sim$stack_list[[year]]
+      
+      model_vars <- b.list[[bootNum]][["var.names"]]
+      ras_vars <- names(ras_stack)
+      missing_vars <- setdiff(model_vars, ras_vars)
+      
+      if (length(missing_vars) > 0) {
+        warning("Missing vars for ", speciesName, " bootstrap ", bootNum, ": ", paste(missing_vars, collapse=", "))
+        next
+      }
+      
+      ras_subset <- terra::subset(ras_stack, model_vars)
+      
+      pred_raster <- terra::predict(ras_subset, b.list[[bootNum]], type = "response")
+      
+      boot_rasters[[bootNum]] <- pred_raster
+    }
+    
+    boot_stack <- rast(boot_rasters)
+    names(boot_stack) <- paste0("b", seq_len(nlyr(boot_stack)), "_",year)
+    sim$predictedList[[speciesName]] <- boot_stack
+    outPath <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_prediction.tif"))
+    terra::writeRaster(boot_stack, outPath, overwrite = TRUE)
+    
+    message("Prediction stack saved for ", speciesName)
+  }
+  
+  message("all predictions complete!")
+  return(sim)
+}
+
+
+# Summarize Bootstrap 
+SummarizeAndSaveBootstrapStack <- function(sim, speciesName, bcr_code, outFolder = "predictions") {
+  boot_stack <- sim$predictedList[[speciesName]]
+  mean_r <- terra::app(boot_stack, mean, na.rm = TRUE)
+  sd_r <- terra::app(boot_stack, sd, na.rm = TRUE)
+  mean_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_mean.tif"))
+  sd_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_sd.tif"))
+  terra::writeRaster(mean_r, mean_path, overwrite = TRUE)
+  terra::writeRaster(sd_r, sd_path, overwrite = TRUE)
+  return(list(mean = mean_r, sd = sd_r))
 }
 
 gg_predMap <- function(x, title = "") {
@@ -249,6 +250,7 @@ plotFun <- function(sim) {
   
   return(invisible(sim))
 }
+
 ### template for your event1
 Event1 <- function(sim) {
   # ! ----- EDIT BELOW ----- ! #
