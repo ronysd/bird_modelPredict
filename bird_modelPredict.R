@@ -202,6 +202,21 @@ Init <- function(sim) {
 
   return(invisible(sim))
 }
+
+gg_predMap <- function(x, title = "") {
+  if (terra::is.factor(x)) {
+    ggplot() +
+      tidyterra::geom_spatraster(data = x) +
+      tidyterra::scale_fill_coltab(data = x, na.value = "transparent") +
+      ggtitle(title)
+  } else {
+    ggplot() +
+      tidyterra::geom_spatraster(data = x * 1.0) +
+      viridis::scale_fill_viridis(na.value = "transparent") +
+      ggtitle(title)
+  }
+}
+
 ### template for save events
 Save <- function(sim) {
   # ! ----- EDIT BELOW ----- ! #
