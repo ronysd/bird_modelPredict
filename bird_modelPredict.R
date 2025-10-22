@@ -15,7 +15,7 @@ defineModule(sim, list(
   timeunit = "year",
   citation = list("citation.bib"),
   documentation = list("NEWS.md", "README.md", "bird_modelPredict.Rmd"),
-  reqdPkgs = list("SpaDES.core (>= 2.1.5.9003)", "ggplot2","SpaDES.core", "tidyterra", "viridis"),
+  reqdPkgs = list("SpaDES.core (>= 2.1.5.9003)", "ggplot2","SpaDES.core", "tidyterra", "viridis", "gbm","crayon"),
   parameters = bindrows(
     #defineParameter("paramName", "paramClass", value, min, max, "parameter description"),
     defineParameter(".plots", "character", "png", NA, NA,
@@ -35,7 +35,14 @@ defineModule(sim, list(
     defineParameter(".seed", "list", list(), NA, NA,
                     "Named list of seeds to use for each event (names)."),
     defineParameter(".useCache", "logical", FALSE, NA, NA,
-                    "Should caching of events or module be used?")
+                    "Should caching of events or module be used?"),
+    defineParameter("predictStartYear", "numeric", NA, NA, NA, 
+                    "First year for prediction"),
+    defineParameter("predictEndYear", "numeric", NA, NA, NA, 
+                    "Last year for prediction"),
+    defineParameter("predictInterval", "numeric", 1, NA, NA, 
+                    "Prediction year interval (e.g., every 5 years)")
+    
   ),
   inputObjects = bindrows(
     expectsInput("sim", "list", "Output list from bird_dataPrep module, containing stack_list"),
@@ -43,7 +50,8 @@ defineModule(sim, list(
     expectsInput("modelFolder", "character", "Path to folder where species models are downloaded")
   ),
   outputObjects = bindrows(
-    createsOutput("predictedList", "list", "Prediction raster stacks for all species")
+    createsOutput("predictedList", "list", "Nested list of prediction raster stacks: predictedList[[species]][[year]]"),
+    createsOutput("summaries", "list", "List of raster summary maps (mean and SD) for each species-year combination")
   )
 ))
 
@@ -123,17 +131,44 @@ doEvent.bird_modelPredict = function(sim, eventTime, eventType) {
 ### template initialization
 Init <- function(sim) {
   # # ! ----- EDIT BELOW ----- ! #
-   # Predict species models  
+   
+  years <- seq(P(sim)$predictStartYear, P(sim)$predictEndYear, by = P(sim)$predictInterval)
+  bcr_code <- unique(sim$studyArea$subUnit)
+  
+
+  sim$predictedList <- list()
+  sim$summaries <- list()
+  # Predict species models  
 
   
-  ## Call prediction & summaries
-  sim <- PredictAllSpecies_blist(sim, year = "2010", nBoot = 2, modelFolder = file.path(inputPath(sim)), outFolder= "predictions") #modelFolder = sim$modelFolder, year = P(sim)$predictionYear,nBoot = P(sim)$nBoot
-  ## currently, the model is predicted for a single year and XX boot. we need to connect this with the year from setupPorject call
-  bcr_code <- unique(sim$studyArea$subUnit)
-  for (speciesName in names(sim$predictedList)) {
-    sim$summaries[[speciesName]] <- SummarizeAndSaveBootstrapStack(sim, speciesName, bcr_code)
+  # ## Call prediction & summaries
+  # sim <- PredictAllSpecies_blist(sim, year = "2010", nBoot = 10, modelFolder = file.path(inputPath(sim)), outFolder= "predictions") #modelFolder = sim$modelFolder, year = P(sim)$predictionYear,nBoot = P(sim)$nBoot
+  # ## currently, the model is predicted for a single year and XX boot. we need to connect this with the year from setupPorject call (may be not? its better to keep them seperate)
+  # bcr_code <- unique(sim$studyArea$subUnit)
+  # for (speciesName in names(sim$predictedList)) {
+  #   sim$summaries[[speciesName]] <- SummarizeAndSaveBootstrapStack(sim, speciesName, bcr_code)
+  # }
+  for (yr in years) {
+    message(green("Running predictions for year: "), yellow(yr))
+    
+    sim <- PredictAllSpecies_blist(sim, year = as.character(yr), nBoot = 2,  #10
+                                   modelFolder = file.path(inputPath(sim)), 
+                                   outFolder = file.path(outputPath(sim), "predictions"))
+    
+    # for (speciesName in names(sim$predictedList)) {
+    #   sim$summaries[[paste0(speciesName, "_", yr)]] <- 
+    #     SummarizeAndSaveBootstrapStack(sim, speciesName, bcr_code,outFolder = file.path(outputPath(sim), "predictions"))
+    # }
+    for (speciesName in names(sim$predictedList)) {
+      for (yr in names(sim$predictedList[[speciesName]])) {
+        sim$summaries[[paste0(speciesName, "_", yr)]] <- 
+          SummarizeAndSaveBootstrapStack(sim, speciesName, bcr_code,
+                                         year = yr,
+                                         outFolder = file.path(outputPath(sim), "predictions"))
+      }
+    }
+    
   }
-  
   # ! ----- STOP EDITING ----- ! #
 
   return(invisible(sim))
@@ -141,6 +176,11 @@ Init <- function(sim) {
 PredictAllSpecies_blist <- function(sim, year, nBoot = NULL, modelFolder, outFolder ) {
   bcr_code <- unique(sim$studyArea$subUnit)
   if (length(bcr_code) != 1) stop("studyArea must have a single BCR subUnit.")
+  
+  if (!(year %in% names(sim$stack_list))) {
+    warning("Year ", year, " not found in stack_list. Skipping prediction for this year.")
+    return(invisible(sim))
+    }
   
   modelFiles <- list.files(modelFolder, pattern = "\\.Rdata$", full.names = TRUE) ## also need to add BCR_code, incase more than one BCR are stored in the folder 
   dir.create(outFolder, recursive = TRUE, showWarnings = FALSE)
@@ -180,29 +220,51 @@ PredictAllSpecies_blist <- function(sim, year, nBoot = NULL, modelFolder, outFol
     
     boot_stack <- rast(boot_rasters)
     names(boot_stack) <- paste0("b", seq_len(nlyr(boot_stack)), "_",year)
-    sim$predictedList[[speciesName]] <- boot_stack
-    outPath <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_prediction.tif"))
+    #sim$predictedList[[speciesName]] <- boot_stack
+    sim$predictedList[[speciesName]][[as.character(year)]] <- boot_stack
+    # outPath <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_prediction.tif"))
+    outPath <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_prediction_", year, ".tif"))
+    
     terra::writeRaster(boot_stack, outPath, overwrite = TRUE)
     
     message("Prediction stack saved for ", speciesName)
   }
-  
-  message("all predictions complete!")
-  return(sim)
+
+  #return(invisible(sim))
 }
 
 
 # Summarize Bootstrap 
-SummarizeAndSaveBootstrapStack <- function(sim, speciesName, bcr_code, outFolder = "predictions") {
-  boot_stack <- sim$predictedList[[speciesName]]
-  mean_r <- terra::app(boot_stack, mean, na.rm = TRUE)
-  sd_r <- terra::app(boot_stack, sd, na.rm = TRUE)
-  mean_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_mean.tif"))
-  sd_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_sd.tif"))
-  terra::writeRaster(mean_r, mean_path, overwrite = TRUE)
-  terra::writeRaster(sd_r, sd_path, overwrite = TRUE)
-  return(list(mean = mean_r, sd = sd_r))
+# SummarizeAndSaveBootstrapStack <- function(sim, speciesName, bcr_code, outFolder ) {
+#   boot_stack <- sim$predictedList[[speciesName]]
+#   mean_r <- terra::app(boot_stack, mean, na.rm = TRUE)
+#   sd_r <- terra::app(boot_stack, sd, na.rm = TRUE)
+#   mean_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_mean.tif"))
+#   sd_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_sd.tif"))
+#   terra::writeRaster(mean_r, mean_path, overwrite = TRUE)
+#   terra::writeRaster(sd_r, sd_path, overwrite = TRUE)
+#   return(list(mean = mean_r, sd = sd_r))
+# }
+
+# SummarizeAndSaveBootstrapStack <- function(sim, speciesName, bcr_code, outFolder = "predictions") {
+SummarizeAndSaveBootstrapStack <- function(sim, speciesName, bcr_code, year, outFolder = "predictions") {
+
+  for (year in names(sim$predictedList[[speciesName]])) {
+    boot_stack <- sim$predictedList[[speciesName]][[year]]
+    mean_r <- terra::app(boot_stack, mean, na.rm = TRUE)
+    sd_r <- terra::app(boot_stack, sd, na.rm = TRUE)
+    
+    mean_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_", year, "_mean.tif"))
+    sd_path <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code, "_", year, "_sd.tif"))
+    
+    terra::writeRaster(mean_r, mean_path, overwrite = TRUE)
+    terra::writeRaster(sd_r, sd_path, overwrite = TRUE)
+    
+    sim$summaries[[paste0(speciesName, "_", year)]] <- list(mean = mean_r, sd = sd_r)
+  }
+  #return(invisible(sim))
 }
+
 
 gg_predMap <- function(x, title = "") {
   if (terra::is.factor(x)) {
@@ -227,24 +289,48 @@ Save <- function(sim) {
   # ! ----- STOP EDITING ----- ! #
   return(invisible(sim))
 }
-browser()
+
 ### template for plot events
+# plotFun <- function(sim) {
+#   for (speciesName in names(sim$summaries)) {
+#     summary <- sim$summaries[[speciesName]]
+#     
+#     Plots(summary$mean,
+#           fn = gg_predMap,
+#           types = P(sim)$.plots,
+#           filename = paste0(speciesName, "_mean_yr_", time(sim)),
+#           title = paste(speciesName, "Mean", time(sim)),
+#           path = file.path(figurePath(sim)))
+#     
+#     Plots(summary$sd,
+#           fn = gg_predMap,
+#           types = P(sim)$.plots,
+#           filename = paste0(speciesName, "_sd_yr_", time(sim)),
+#           title = paste(speciesName, "SD", time(sim)),
+#           path = file.path(figurePath(sim)))
+#   }
+#   
+#   return(invisible(sim))
+# }
 plotFun <- function(sim) {
-  for (speciesName in names(sim$summaries)) {
-    summary <- sim$summaries[[speciesName]]
+  for (key in names(sim$summaries)) {
+    summary <- sim$summaries[[key]]
+    parts <- strsplit(key, "_")[[1]]
+    speciesName <- paste(parts[-length(parts)], collapse = "_")
+    yr <- parts[length(parts)]
     
     Plots(summary$mean,
           fn = gg_predMap,
           types = P(sim)$.plots,
-          filename = paste0(speciesName, "_mean_yr_", time(sim)),
-          title = paste(speciesName, "Mean", time(sim)),
+          filename = paste0(speciesName, "_mean_yr_", yr),
+          title = paste(speciesName, "Mean", yr),
           path = file.path(figurePath(sim)))
     
     Plots(summary$sd,
           fn = gg_predMap,
           types = P(sim)$.plots,
-          filename = paste0(speciesName, "_sd_yr_", time(sim)),
-          title = paste(speciesName, "SD", time(sim)),
+          filename = paste0(speciesName, "_sd_yr_", yr),
+          title = paste(speciesName, "SD", yr),
           path = file.path(figurePath(sim)))
   }
   
