@@ -177,7 +177,7 @@ PredictAllSpecies_blist <- function(sim, year, nBoot = NULL, modelFolder, outFol
   bcr_code <- unique(sim$studyArea$subUnit)
   if (length(bcr_code) != 1) stop("studyArea must have a single BCR subUnit.")
   
-  if (!(year %in% names(sim$stack_list))) {
+  if (!(as.character(year) %in% as.character(names(sim$stack_list)))) {
     warning("Year ", year, " not found in stack_list. Skipping prediction for this year.")
     return(invisible(sim))
     }
@@ -230,7 +230,7 @@ PredictAllSpecies_blist <- function(sim, year, nBoot = NULL, modelFolder, outFol
     message("Prediction stack saved for ", speciesName)
   }
 
-  #return(invisible(sim))
+  return(invisible(sim))
 }
 
 
@@ -262,9 +262,11 @@ SummarizeAndSaveBootstrapStack <- function(sim, speciesName, bcr_code, year, out
     
     sim$summaries[[paste0(speciesName, "_", year)]] <- list(mean = mean_r, sd = sd_r)
   }
-  #return(invisible(sim))
+  if (is.null(sim$predictedList[[speciesName]][[year]])) {
+    warning("No prediction stack found for ", speciesName, " in year ", year, ". Skipping summary.")
+    return(invisible(sim))
 }
-
+}
 
 gg_predMap <- function(x, title = "") {
   if (terra::is.factor(x)) {
@@ -312,28 +314,81 @@ Save <- function(sim) {
 #   
 #   return(invisible(sim))
 # }
+# plotFun <- function(sim) {
+#   for (key in names(sim$summaries)) {
+#     summary <- sim$summaries[[key]]
+#     parts <- strsplit(key, "_")[[1]]
+#     speciesName <- paste(parts[-length(parts)], collapse = "_")
+#     yr <- parts[length(parts)]
+#     
+#     Plots(summary$mean,
+#           fn = gg_predMap,
+#           types = P(sim)$.plots,
+#           filename = paste0(speciesName, "_mean_yr_", yr),
+#           title = paste(speciesName, "Mean", yr),
+#           path = file.path(figurePath(sim)))
+#     
+#     Plots(summary$sd,
+#           fn = gg_predMap,
+#           types = P(sim)$.plots,
+#           filename = paste0(speciesName, "_sd_yr_", yr),
+#           title = paste(speciesName, "SD", yr),
+#           path = file.path(figurePath(sim)))
+#   }
+#   
+#   return(invisible(sim))
+# }
+
 plotFun <- function(sim) {
-  for (key in names(sim$summaries)) {
-    summary <- sim$summaries[[key]]
-    parts <- strsplit(key, "_")[[1]]
-    speciesName <- paste(parts[-length(parts)], collapse = "_")
-    yr <- parts[length(parts)]
-    
-    Plots(summary$mean,
-          fn = gg_predMap,
-          types = P(sim)$.plots,
-          filename = paste0(speciesName, "_mean_yr_", yr),
-          title = paste(speciesName, "Mean", yr),
-          path = file.path(figurePath(sim)))
-    
-    Plots(summary$sd,
-          fn = gg_predMap,
-          types = P(sim)$.plots,
-          filename = paste0(speciesName, "_sd_yr_", yr),
-          title = paste(speciesName, "SD", yr),
-          path = file.path(figurePath(sim)))
+  if (is.null(sim$summaries) || length(sim$summaries) == 0) {
+    warning("No summaries available to plot. Skipping plot event.")
+    return(invisible(sim))
   }
   
+  for (key in names(sim$summaries)) {
+    summary <- sim$summaries[[key]]
+    
+    if (is.null(summary) || !("mean" %in% names(summary)) || !("sd" %in% names(summary))) {
+      warning("Skipping plot for ", key, " (summary missing mean/sd).")
+      next
+    }
+    if (is.null(summary$mean) || is.null(summary$sd)) {
+      warning("Skipping plot for ", key, " (raster(s) are NULL).")
+      next
+    }
+    
+    # --- Parse species and year from key name ---
+    parts <- strsplit(key, "_")[[1]]
+    if (length(parts) < 2) {
+      warning("Unexpected summary key format: ", key, ". Expected 'species_year'. Skipping.")
+      next
+    }
+    speciesName <- paste(parts[-length(parts)], collapse = "_")
+    yr <- parts[length(parts)]
+    try({
+      Plots(
+        summary$mean,
+        fn = gg_predMap,
+        types = P(sim)$.plots,
+        filename = paste0(speciesName, "_mean_yr_", yr),
+        title = paste(speciesName, "Mean", yr),
+        path = file.path(figurePath(sim))
+      )
+    }, silent = TRUE)
+
+    try({
+      Plots(
+        summary$sd,
+        fn = gg_predMap,
+        types = P(sim)$.plots,
+        filename = paste0(speciesName, "_sd_yr_", yr),
+        title = paste(speciesName, "SD", yr),
+        path = file.path(figurePath(sim))
+      )
+    }, silent = TRUE)
+  }
+  
+  message("Finished plotting all available summaries for ", currentModule(sim))
   return(invisible(sim))
 }
 
