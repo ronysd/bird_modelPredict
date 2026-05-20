@@ -46,15 +46,16 @@ defineModule(sim, list(
   ),
   inputObjects = bindrows(
     expectsInput("stack_list", "list", "Raster stacks created in DataPrep or translator module"),
-    expectsInput("studyArea", "SpatVector", "Study area polygon"),
-    expectsInput("modelFolder", "character", "Local path to downloaded models objects per species per BCR"),
-    expectsInput("climateYear", "numeric", "Optional year override for dynamic predictions; used when running NRV-style single-year predictions")
+    expectsInput("studyArea", "SpatVector", desc = "Study area polygon"),
+    expectsInput("modelFolder", "character", desc = "Local path to downloaded models objects per species per BCR"),
+    expectsInput("climateYear", "numeric", desc = "Optional year override for dynamic predictions; used when running NRV-style single-year predictions"),
+    expectsInput("climateYearRecord", "data.table", desc = "Optional table with simYear and climateYear columns")
   ),
   outputObjects = bindrows(
     createsOutput("predictedList", "list", "Prediction raster stacks for all species")
   )
 ))
-
+#browser()
 doEvent.bird_modelPredict = function(sim, eventTime, eventType) {
   switch(
     eventType,
@@ -142,7 +143,7 @@ doEvent.bird_modelPredict = function(sim, eventTime, eventType) {
 Init <- function(sim) {
   
   message("Initializing bird_modelPredict...")
-  
+ browser() 
   # required objects from dataPrep / translator
   if (is.null(sim$stack_list))
     stop("stack_list must be supplied to bird_modelPredict module.")
@@ -157,18 +158,48 @@ Init <- function(sim) {
   
   return(invisible(sim))
 }
-
+#rowser()
 Predict <- function(sim) {
-  #browser()
+
   #year <- time(sim)
   
   ## MODIFICATION FOR NEW climateYear Module
   # year <- if (!is.null(sim$climateYear)) sim$climateYear else time(sim)
+  ## corection 13th may
+  # year <- time(sim)
+  # climate_year <- if (!is.null(sim$climateYear)) sim$climateYear else year
   year <- time(sim)
-  climate_year <- if (!is.null(sim$climateYear)) sim$climateYear else year
   
+  if (!is.null(sim$climateYearRecord)) {
+  #   rec <- sim$climateYearRecord
+  #   val <- rec$climateYear[rec$simYear == year,]
+  #   
+  #   if (length(val) != 1) {
+  #     stop("climateYearRecord invalid or missing for simYear = ", year)
+  #   }
+  #   
+  #   climate_year <- val
+  #   
+  # }
+    climate_row <- sim$climateYearRecord[
+      sim$climateYearRecord$simYear == as.numeric(year), 
+    ]
+    
+    if (nrow(climate_row) == 0) {
+      stop("No climate year found in climateYearRecord for simulation year: ", year)
+    }
+    
+    climate_year <- climate_row$climateYear[1]
+    
+  }
+  
+  else if (!is.null(sim$climateYear)) {
+    climate_year <- sim$climateYear
+  } else {
+    climate_year <- year
+  }
   message(bold$green("Running bird_modelPredict for year: "), bold$yellow(year))
-  #browser()
+  browser()
   ##ensure co-variate list exists
   # if (is.null(sim$stack_list[[as.character(year)]])) {
   #   # Trigger translator to build it
@@ -205,6 +236,7 @@ Predict <- function(sim) {
   # )
   # 
   ## ADDED 29th March
+  browser()
   if (is.null(sim$stack_list[[as.character(year)]])) {
     if ("bird_covariateTranslator" %in% modules(sim)) {
       message("Missing covariates → scheduling translator for year ", year)
@@ -280,12 +312,21 @@ Predict <- function(sim) {
   # }
   
   ## NEW ADDITION FOR climateYear approach
-  if (is.null(sim$climateYear)) {
-    next_year <- year + P(sim)$predictInterval
-    if (next_year <= P(sim)$predictEndYear) {
-      sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "predict", eventPriority = 7)
-      sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "plot")
-    }
+  ## correction 13th May
+  # if (is.null(sim$climateYear)) {
+  #   next_year <- year + P(sim)$predictInterval
+  #   if (next_year <= P(sim)$predictEndYear) {
+  #     sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "predict", eventPriority = 7)
+  #     sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "plot")
+  #   }
+  # }
+  ## Schedule next simulation year.
+  ## Do not suppress scheduling just because climate_year is externally supplied.
+  next_year <- year + P(sim)$predictInterval
+  
+  if (next_year <= P(sim)$predictEndYear) {
+    sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "predict", eventPriority = 7)
+    sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "plot")
   }
   return(invisible(sim))
 }
@@ -368,7 +409,7 @@ PredictAllSpecies_blist <- function(
       #   ras_subset <- terra::subset(ras_stack, model_vars)
       #   terra::predict(ras_subset, model, type = "response")
       # }
-      predict_bootstrap_raster <- function(
+    predict_bootstrap_raster <- function(
     ras_stack,
     model_vars,
     model,
@@ -411,7 +452,7 @@ PredictAllSpecies_blist <- function(
       )
       
     }
-    
+    #browser()
     boot_stack <- rast(boot_rasters)
     names(boot_stack) <- paste0("b", seq_len(nlyr(boot_stack)), "_",year)
     # sim$predictedList[[speciesName]] <- boot_stack
