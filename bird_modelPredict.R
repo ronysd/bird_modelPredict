@@ -41,20 +41,30 @@ defineModule(sim, list(
     defineParameter("predictEndYear", "numeric", NA, NA, NA,
                     desc = "Last year to predict the model"),
     defineParameter("predictInterval", "numeric", 1, NA, NA,
-                    desc = "Interval between years to predict")
+                    desc = "Interval between years to predict"),
+    defineParameter("weightFolderURL", "character", NA, NA, NA,
+                    desc = "Google Drive folder URL containing BCR weight rasters from BAM"),
+    defineParameter("bootstrapIDs", "numeric", NA_real_, NA, NA,
+                    desc = "Selected BAM bootstrap indices"),
+    defineParameter("parallelSpecies", "logical", FALSE, NA, NA,
+                    desc = "Whether to parallelize species-level predictions"),
+    defineParameter("nSpeciesWorkers", "numeric", 8, 1, 48,
+                    desc = "Number of workers for species-level prediction")
     
   ),
   inputObjects = bindrows(
     expectsInput("stack_list", "list", "Raster stacks created in DataPrep or translator module"),
-    expectsInput("studyArea", "SpatVector", "Study area polygon"),
-    expectsInput("modelFolder", "character", "Local path to downloaded models objects per species per BCR"),
-    expectsInput("climateYear", "numeric", "Optional year override for dynamic predictions; used when running NRV-style single-year predictions")
+    expectsInput("studyArea", "SpatVector", desc = "Study area polygon"),
+    expectsInput("modelFolder", "character", desc = "Local path to downloaded models objects per species per BCR"),
+    expectsInput("climateYear", "numeric", desc = "Optional year override for dynamic predictions; used when running NRV-style single-year predictions"),
+    expectsInput("climateYearRecord", "data.table", desc = "Optional table with simYear and climateYear columns")
   ),
   outputObjects = bindrows(
     createsOutput("predictedList", "list", "Prediction raster stacks for all species")
+    , createsOutput("summaries", "list", "List of summarized prediction (mean and SD) across all bootstrap for all species")
   )
 ))
-
+#browser()
 doEvent.bird_modelPredict = function(sim, eventTime, eventType) {
   switch(
     eventType,
@@ -142,7 +152,7 @@ doEvent.bird_modelPredict = function(sim, eventTime, eventType) {
 Init <- function(sim) {
   
   message("Initializing bird_modelPredict...")
-  
+ #browser() 
   # required objects from dataPrep / translator
   if (is.null(sim$stack_list))
     stop("stack_list must be supplied to bird_modelPredict module.")
@@ -153,20 +163,51 @@ Init <- function(sim) {
   
   # initialize outputs
   if (is.null(sim$predictedList)) sim$predictedList <- list()
+  if (is.null(sim$mosaicedPredictions)) sim$mosaicedPredictions <- list()
   if (is.null(sim$summaries))     sim$summaries     <- list()
   
   return(invisible(sim))
 }
-
+#rowser()
 Predict <- function(sim) {
-  #browser()
+
   #year <- time(sim)
   
   ## MODIFICATION FOR NEW climateYear Module
   # year <- if (!is.null(sim$climateYear)) sim$climateYear else time(sim)
+  ## corection 13th may
+  # year <- time(sim)
+  # climate_year <- if (!is.null(sim$climateYear)) sim$climateYear else year
   year <- time(sim)
-  climate_year <- if (!is.null(sim$climateYear)) sim$climateYear else year
   
+  if (!is.null(sim$climateYearRecord)) {
+  #   rec <- sim$climateYearRecord
+  #   val <- rec$climateYear[rec$simYear == year,]
+  #   
+  #   if (length(val) != 1) {
+  #     stop("climateYearRecord invalid or missing for simYear = ", year)
+  #   }
+  #   
+  #   climate_year <- val
+  #   
+  # }
+    climate_row <- sim$climateYearRecord[
+      sim$climateYearRecord$simYear == as.numeric(year), 
+    ]
+    
+    if (nrow(climate_row) == 0) {
+      stop("No climate year found in climateYearRecord for simulation year: ", year)
+    }
+    
+    climate_year <- climate_row$climateYear[1]
+    
+  }
+  
+  else if (!is.null(sim$climateYear)) {
+    climate_year <- sim$climateYear
+  } else {
+    climate_year <- year
+  }
   message(bold$green("Running bird_modelPredict for year: "), bold$yellow(year))
   #browser()
   ##ensure co-variate list exists
@@ -205,6 +246,7 @@ Predict <- function(sim) {
   # )
   # 
   ## ADDED 29th March
+  #browser()
   if (is.null(sim$stack_list[[as.character(year)]])) {
     if ("bird_covariateTranslator" %in% modules(sim)) {
       message("Missing covariates → scheduling translator for year ", year)
@@ -225,19 +267,64 @@ Predict <- function(sim) {
   
   
   ## Multi BCR prediction
+  ## modification May 22nd
+  ## Multi BCR prediction
   for (bcr in sim$BCR_codes) {
     bcr_poly <- sim$BCR_parts[sim$BCR_parts$subUnit == bcr]
     sim <- PredictAllSpecies_blist(
-      sim         = sim,
-      year        = as.character(year),
+      sim          = sim,
+      year         = as.character(year),
       climate_year = climate_year,
-      modelFolder = P(sim)$modelFolder,
-      bcr_code    = bcr,
-      bcr_poly    = bcr_poly,
-      nBoot = 2,
-      outFolder   = "predictions"
+      modelFolder  = P(sim)$modelFolder,
+      bcr_code     = bcr,
+      bcr_poly     = bcr_poly,
+      #nBoot        = 2,
+      bootstrapIDs = P(sim)$bootstrapIDs,
+      outFolder    = "predictions"
     )
   }
+  
+  ## Weighted BCR mosaicing after all BCR predictions are complete
+  if (is.na(P(sim)$weightFolderURL)) {
+    stop("weightFolderURL must be supplied because weighted BCR mosaicing is required.")
+  }
+  
+  if (is.null(sim$mosaicedPredictions)) sim$mosaicedPredictions <- list()
+  
+  for (speciesName in names(sim$predictedList)) {
+    
+    if (!is.null(sim$predictedList[[speciesName]][[as.character(year)]])) {
+      
+      if (is.null(sim$mosaicedPredictions[[speciesName]])) {
+        sim$mosaicedPredictions[[speciesName]] <- list()
+      }
+      
+      sim$mosaicedPredictions[[speciesName]][[as.character(year)]] <-
+        runWeightedBCRMosaic(
+          sim             = sim,
+          species         = speciesName,
+          year            = year,
+          weightFolderURL = P(sim)$weightFolderURL,
+          destinationPath = file.path(dataPath(sim), "BCR_weights")
+        )
+    }
+  }
+  
+  # summarizing bootstrap outputs
+  
+  # for (bcr in sim$BCR_codes) {
+  #   bcr_poly <- sim$BCR_parts[sim$BCR_parts$subUnit == bcr]
+  #   sim <- PredictAllSpecies_blist(
+  #     sim         = sim,
+  #     year        = as.character(year),
+  #     climate_year = climate_year,
+  #     modelFolder = P(sim)$modelFolder,
+  #     bcr_code    = bcr,
+  #     bcr_poly    = bcr_poly,
+  #     nBoot = 2,
+  #     outFolder   = "predictions"
+  #   )
+  # }
   
   # summarizing bootstrap outputs
   #bcr_code <- unique(sim$studyArea$subUnit)
@@ -280,12 +367,21 @@ Predict <- function(sim) {
   # }
   
   ## NEW ADDITION FOR climateYear approach
-  if (is.null(sim$climateYear)) {
-    next_year <- year + P(sim)$predictInterval
-    if (next_year <= P(sim)$predictEndYear) {
-      sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "predict", eventPriority = 7)
-      sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "plot")
-    }
+  ## correction 13th May
+  # if (is.null(sim$climateYear)) {
+  #   next_year <- year + P(sim)$predictInterval
+  #   if (next_year <= P(sim)$predictEndYear) {
+  #     sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "predict", eventPriority = 7)
+  #     sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "plot")
+  #   }
+  # }
+  ## Schedule next simulation year.
+  ## Do not suppress scheduling just because climate_year is externally supplied.
+  next_year <- year + P(sim)$predictInterval
+  
+  if (next_year <= P(sim)$predictEndYear) {
+    sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "predict", eventPriority = 7)
+    sim <- scheduleEvent(sim, next_year, "bird_modelPredict", "plot")
   }
   return(invisible(sim))
 }
@@ -297,7 +393,8 @@ PredictAllSpecies_blist <- function(
     year,
     bcr_code,
     bcr_poly,
-    nBoot = NULL,
+    #nBoot = NULL,
+    bootstrapIDs,
     climate_year,
     modelFolder,
     outFolder
@@ -310,17 +407,35 @@ PredictAllSpecies_blist <- function(
     dir.create(outFolder, recursive = TRUE, showWarnings = FALSE)
     ## FOr multi BCR
     
+    
+    ################## IMPORTANT TRYING TO APPLY FUTURE APPLY FOR PARALLEL RUN PER SPECIES
+    
     for (modelPath in modelFiles) {
-    message("Processing model file: ", modelPath)
+    #message("Processing model file: ", modelPath)
+    message("Running prediction for BCR_", bcr_code)  
     load(modelPath)  # loads b.list, this needs to be aligned with the model objects, when single model object contains all bootstrap, they are contained under b.list. 
     
     speciesName <- sub("_can.*$", "", basename(modelPath))
     
-    boot_indices <- seq_along(b.list)
-    if (!is.null(nBoot)) {
-      boot_indices <- boot_indices[1:min(nBoot, length(boot_indices))]
-    }
+    # boot_indices <- seq_along(b.list)
+    # if (!is.null(nBoot)) {
+    #   boot_indices <- boot_indices[1:min(nBoot, length(boot_indices))]
+    # }
+    boot_indices <- as.integer(bootstrapIDs)
     
+    if (
+      length(boot_indices) == 0L ||
+      anyNA(boot_indices) ||
+      anyDuplicated(boot_indices) ||
+      any(boot_indices < 1L) ||
+      any(boot_indices > length(b.list)) ||
+      any(boot_indices != bootstrapIDs)
+    ) {
+      stop(
+        "Invalid bootstrapIDs for species ", speciesName,
+        " in BCR ", bcr_code
+      )
+    }
     boot_rasters <- list()
     for (bootNum in boot_indices) {
       message(" - Bootstrap: ", bootNum)
@@ -368,7 +483,7 @@ PredictAllSpecies_blist <- function(
       #   ras_subset <- terra::subset(ras_stack, model_vars)
       #   terra::predict(ras_subset, model, type = "response")
       # }
-      predict_bootstrap_raster <- function(
+    predict_bootstrap_raster <- function(
     ras_stack,
     model_vars,
     model,
@@ -411,19 +526,200 @@ PredictAllSpecies_blist <- function(
       )
       
     }
+    #browser()
+    # boot_stack <- rast(boot_rasters)
+    # names(boot_stack) <- paste0("b", seq_len(nlyr(boot_stack)), "_",year)
+    valid_boot_ids <- which(
+      !vapply(boot_rasters, is.null, logical(1))
+    )
     
-    boot_stack <- rast(boot_rasters)
-    names(boot_stack) <- paste0("b", seq_len(nlyr(boot_stack)), "_",year)
+    boot_rasters <- boot_rasters[valid_boot_ids]
+    
+    if (length(boot_rasters) == 0L) {
+      stop(
+        "No valid bootstrap predictions for species ",
+        speciesName, " in BCR ", bcr_code,
+        " for year ", year
+      )
+    }
+    
+    if (!setequal(valid_boot_ids, boot_indices)) {
+      stop(
+        "Some requested bootstraps failed for species ",
+        speciesName, " in BCR ", bcr_code,
+        ". Requested: ", paste(boot_indices, collapse = ", "),
+        "; available: ", paste(valid_boot_ids, collapse = ", ")
+      )
+    }
+    
+    # Ensure layers follow the assigned bootstrap order
+    boot_rasters <- boot_rasters[
+      match(boot_indices, valid_boot_ids)
+    ]
+    
+    boot_stack <- terra::rast(boot_rasters)
+    
+    names(boot_stack) <- paste0(
+      "b", boot_indices, "_", year
+    )
     # sim$predictedList[[speciesName]] <- boot_stack
     #sim$predictedList[[speciesName]][[as.character(year)]] <- boot_stack
     sim$predictedList[[speciesName]][[as.character(year)]][[as.character(bcr_code)]] <- boot_stack
     outPath <- file.path(outFolder, paste0(speciesName, "_BCR_", bcr_code,"_",year, "_prediction.tif"))
     terra::writeRaster(boot_stack, outPath, overwrite = TRUE)
     
-    message("Prediction stack saved for ", speciesName)
+    message("Prediction stack saved for species ", speciesName)
   }
   
-  message("all predictions complete!")
+  ########################### END COMMENTED OUT THIS BLOCK  BELLOW FOR PARALLEL, START and END
+    
+    ## START
+    # predict_one_species <- function(modelPath) {
+    #   
+    #   message("Processing model file: ", modelPath)
+    #   
+    #   e <- new.env()
+    #   load(modelPath, envir = e)
+    #   b.list <- e$b.list
+    #   
+    #   speciesName <- sub("_can.*$", "", basename(modelPath))
+    #   
+    #   boot_indices <- seq_along(b.list)
+    #   if (!is.null(nBoot)) {
+    #     boot_indices <- boot_indices[1:min(nBoot, length(boot_indices))]
+    #   }
+    #   
+    #   ras_stack <- sim$stack_list[[year]]
+    #   if (is.null(ras_stack)) {
+    #     stop("No raster stack found for year ", year,
+    #          ". Check stack_list names or translator module output.")
+    #   }
+    #   
+    #   names(ras_stack) <- make.unique(names(ras_stack))
+    #   ras_vars <- names(ras_stack)
+    #   
+    #   predict_bootstrap_raster <- function(
+    # ras_stack,
+    # model_vars,
+    # model,
+    # bcr_poly,
+    # year,
+    # climate_year
+    #   ) {
+    #     ras_subset <- terra::subset(ras_stack, model_vars)
+    #     pred <- terra::predict(ras_subset, model, type = "response")
+    #     pred <- terra::mask(pred, bcr_poly)
+    #     return(pred)
+    #   }
+    #   
+    #   boot_rasters <- list()
+    #   
+    #   for (bootNum in boot_indices) {
+    #     
+    #     message(" - ", speciesName, " | Bootstrap: ", bootNum)
+    #     
+    #     model_vars <- b.list[[bootNum]][["var.names"]]
+    #     missing_vars <- setdiff(model_vars, ras_vars)
+    #     
+    #     if (length(missing_vars) > 0) {
+    #       warning("Missing vars for ", speciesName, " bootstrap ", bootNum, ": ",
+    #               paste(missing_vars, collapse = ", "))
+    #       next
+    #     }
+    #     
+    #     boot_rasters[[bootNum]] <- Cache(
+    #       predict_bootstrap_raster,
+    #       ras_stack,
+    #       model_vars,
+    #       b.list[[bootNum]],
+    #       bcr_poly,
+    #       year,
+    #       climate_year,
+    #       userTags = c(
+    #         "bootstrap",
+    #         speciesName,
+    #         paste0("sim_", year),
+    #         paste0("clim_", climate_year),
+    #         paste0("boot_", bootNum),
+    #         paste0("bcr_", bcr_code),
+    #         paste0("species_", speciesName)
+    #       )
+    #     )
+    #   }
+    #   
+    #   boot_rasters <- Filter(Negate(is.null), boot_rasters)
+    #   
+    #   if (length(boot_rasters) == 0) {
+    #     warning("No valid bootstrap predictions for ", speciesName,
+    #             " BCR ", bcr_code, " year ", year)
+    #     return(NULL)
+    #   }
+    #   
+    #   boot_stack <- terra::rast(boot_rasters)
+    #   names(boot_stack) <- paste0("b", seq_len(terra::nlyr(boot_stack)), "_", year)
+    #   
+    #   outPath <- file.path(
+    #     outFolder,
+    #     paste0(speciesName, "_BCR_", bcr_code, "_", year, "_prediction.tif")
+    #   )
+    #   
+    #   terra::writeRaster(boot_stack, outPath, overwrite = TRUE)
+    #   
+    #   message("Prediction stack saved for ", speciesName,
+    #           " | BCR = ", bcr_code, " | year = ", year)
+    #   
+    #   list(
+    #     speciesName = speciesName,
+    #     boot_stack  = boot_stack
+    #   )
+    # }
+    # 
+    # if (isTRUE(P(sim)$parallelSpecies)) {
+    #   
+    #   old_plan <- future::plan()
+    #   on.exit(future::plan(old_plan), add = TRUE)
+    #   
+    #   future::plan(
+    #     future::multisession,
+    #     workers = P(sim)$nSpeciesWorkers
+    #   )
+    #   
+    #   species_results <- future.apply::future_lapply(
+    #     modelFiles,
+    #     predict_one_species,
+    #     future.seed = TRUE
+    #   )
+    #   
+    # } else {
+    #   
+    #   species_results <- lapply(
+    #     modelFiles,
+    #     predict_one_species
+    #   )
+    # }
+    # 
+    # species_results <- Filter(Negate(is.null), species_results)
+    # 
+    # for (res in species_results) {
+    #   
+    #   if (is.null(sim$predictedList[[res$speciesName]])) {
+    #     sim$predictedList[[res$speciesName]] <- list()
+    #   }
+    #   
+    #   if (is.null(sim$predictedList[[res$speciesName]][[as.character(year)]])) {
+    #     sim$predictedList[[res$speciesName]][[as.character(year)]] <- list()
+    #   }
+    #   
+    #   sim$predictedList[[res$speciesName]][[as.character(year)]][[as.character(bcr_code)]] <-
+    #     res$boot_stack
+    # }
+    
+    ################################################################################################ END ################################################################################################
+    
+  #message(bold("Prediction for all species completed for BCR ", bcr_code, " for ", year))
+  message(bold("BCR ",bcr_code, ":","All species prediction completed for ", year))
+    
+    #"BCR 12: All species predictions completed for 2220."
   return(sim)
 }
 
@@ -440,19 +736,30 @@ PredictAllSpecies_blist <- function(
 #   terra::writeRaster(sd_r, sd_path, overwrite = TRUE)
 #   return(list(mean = mean_r, sd = sd_r))
 # }
+
+## modificaiton May 22nd
 SummarizeAndSaveBootstrapStack <- function(sim, speciesName, year, outFolder = "predictions") {
   
-  # get the single-year SpatRaster bootstrap stack
-  #boot_stack <- sim$predictedList[[speciesName]][[as.character(year)]]
-  speciesStacks <- sim$predictedList[[speciesName]][[as.character(year)]]
-  # boot_stack <- Reduce(terra::cover, speciesStacks)
-  nboot <- nlyr(speciesStacks[[1]])
-  merged_layers <- lapply(seq_len(nboot), function(i) {
-    rasters_i <- lapply(speciesStacks, function(x) x[[i]])
-    Reduce(terra::cover, rasters_i)
-  })
-  #browser()
-  boot_stack <- terra::rast(merged_layers)
+  if (is.null(sim$mosaicedPredictions[[speciesName]][[as.character(year)]])) {
+    stop("No weighted mosaiced prediction found for species ", speciesName,
+         " and year ", year)
+  }
+  
+  boot_stack <- sim$mosaicedPredictions[[speciesName]][[as.character(year)]]
+
+# SummarizeAndSaveBootstrapStack <- function(sim, speciesName, year, outFolder = "predictions") {
+#   
+#   # get the single-year SpatRaster bootstrap stack
+#   #boot_stack <- sim$predictedList[[speciesName]][[as.character(year)]]
+#   speciesStacks <- sim$predictedList[[speciesName]][[as.character(year)]]
+#   # boot_stack <- Reduce(terra::cover, speciesStacks)
+#   nboot <- nlyr(speciesStacks[[1]])
+#   merged_layers <- lapply(seq_len(nboot), function(i) {
+#     rasters_i <- lapply(speciesStacks, function(x) x[[i]])
+#     Reduce(terra::cover, rasters_i)
+#   })
+#   #browser()
+#   boot_stack <- terra::rast(merged_layers)
   if (is.null(boot_stack))
     stop("No bootstrap stack found for species ", speciesName, " and year ", year)
   
